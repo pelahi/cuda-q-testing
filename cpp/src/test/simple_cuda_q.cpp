@@ -1,7 +1,7 @@
 // Compile and run with:
-// ```
-// nvq++ -I$(pwd)/../profile_util/include/ -L$(pwd)/../profile_util/build/  simple_cuda_q.cpp -o ghz.x && ./ghz.x
-// ```
+// 
+// nvq++ -D_CUDA -D_MPI -L/opt/nvidia/hpc_sdk/Linux_aarch64/24.5/cuda/12.4/targets/sbsa-linux/lib/ -I/opt/nvidia/hpc_sdk/Linux_aarch64/24.5/cuda/12.4/targets/sbsa-linux/include/ -I../../../profile_util/include/ -L../../../profile_util/build/src/ simple_cuda_q.cpp -o ghz -lprofile_util -lmpi -lcudart
+// 
 
 #include <iostream>
 #include <vector>
@@ -10,27 +10,42 @@
 // include cudaq.h
 #include <cudaq.h>
 #include <cudaq/algorithm.h>
+#include <cudaq/algorithms/draw.h>
 
 
 /// Define a CUDA Quantum kernel that is fully specified
-// at compile time via templates.
-/// the __qpu__ indicates a quantum kernel 
+/// at compile time via templates. __qpu__ indicates a quantum kernel 
 struct ghz {
-    auto operator()(size_t N) __qpu__ {
-        cudaq::qarray<N> q;
+    auto operator()(const size_t N) __qpu__ {
+        cudaq::qvector q(N);
         // why don't I need the namespace?
-        h(q[0]);
+        cudaq::h(q[0]);
         for (int i = 0; i < N - 1; i++) {
-            x<cudaq::ctrl>(q[i], q[i + 1]);
+            cudaq::x<cudaq::ctrl>(q[i], q[i + 1]);
         }
-        mz(q);
+        cudaq::mz(q);
     }
 };
 
 struct Options {
   int nqubits = 1;
   int nshots = 1;
+};
+
+///Outputs the usage to stdout
+void usage(void)
+{
+    Options opt;
+    std::cerr<<"USAGE:\n";
+    std::cerr<<"\n";
+    std::cerr<<"-n number of qubits ("<<opt.nqubits<<")"<<std::endl;
+    std::cerr<<"-s number of qubits ("<<opt.nshots<<")"<<std::endl;
+#ifdef _MPI
+    cudaq::mpi::finalize();
+#endif
+    exit(1);
 }
+
 
 ///routine to get arguments from command line
 void GetArgs(int argc, char *argv[], Options &opt)
@@ -49,26 +64,11 @@ void GetArgs(int argc, char *argv[], Options &opt)
                 opt.nshots = atoi(optarg);
                 NumArgs += 2;
                 break;
-            case :
+            case '?':
                 usage();
         }
     }
 }
-
-///Outputs the usage to stdout
-void usage(void)
-{
-    Options opt;
-    cerr<<"USAGE:\n";
-    cerr<<"\n";
-    cerr<<"-n number of qubits ("<<opt.nqubits>>")"<<endl;
-    cerr<<"-s number of qubits ("<<opt.nshots>>")"<<endl;
-#ifdef _MPI
-    ::cudaq::mpi::finalize();
-#endif
-    exit(1);
-}
-
 
 int main(int argc,char **argv) {
 
@@ -76,11 +76,13 @@ int main(int argc,char **argv) {
     // to initialize mpi, get ranks, etc. 
     // appears at first glance no sub communicator
     // construction
+    int ThisTask = 0;
 #ifdef _MPI
     auto comm = MPI_COMM_WORLD;
-    ::cudaq::mpi::initalize(&argc, &argv);
-    MPI_Init(&argc, &argv);
+    cudaq::mpi::initialize(argc, argv);
+    // MPI_Init(&argc, &argv);
     MPISetLoggingComm(comm);
+    MPI_Comm_rank(comm, &ThisTask);
 #endif 
 #ifdef _MPI
     MPILog0Version();
@@ -121,7 +123,7 @@ int main(int argc,char **argv) {
             Log()<<"Observed: "<<bits.data() <<" "<<count<<std::endl;
         }
     }
-
-return 0;
+    cudaq::mpi::finalize();
+    return 0;
 }
 
