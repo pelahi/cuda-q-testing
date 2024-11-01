@@ -30,6 +30,16 @@ struct ghz {
 struct Options {
   int nqubits = 1;
   int nshots = 1;
+  bool iverbose = false;
+  /// @brief  noise parameters
+  //@{
+  struct noise_prob {
+  float dep = 1.0;
+  float bf = 0.5;
+  float pf = 0.5;
+  } noise_probs;
+
+  //@} 
 };
 
 ///Outputs the usage to stdout
@@ -40,6 +50,10 @@ void usage(void)
     std::cerr<<"\n";
     std::cerr<<"-n number of qubits ("<<opt.nqubits<<")"<<std::endl;
     std::cerr<<"-s number of qubits ("<<opt.nshots<<")"<<std::endl;
+    std::cerr<<"-d number of qubits ("<<opt.noise_probs.dep<<")"<<std::endl;
+    std::cerr<<"-b number of qubits ("<<opt.noise_probs.bf<<")"<<std::endl;
+    std::cerr<<"-p number of qubits ("<<opt.noise_probs.pf<<")"<<std::endl;
+    std::cerr<<"-v verbose ("<<opt.iverbose<<")"<<std::endl;
 #ifdef _MPI
     cudaq::mpi::finalize();
 #endif
@@ -52,7 +66,7 @@ void GetArgs(int argc, char *argv[], Options &opt)
 {
     int option;
     int NumArgs = 0;
-    while ((option = getopt(argc, argv, ":n:s:")) != EOF)
+    while ((option = getopt(argc, argv, ":n:s:d:b:p:v:")) != EOF)
     {
         switch(option)
         {
@@ -62,6 +76,22 @@ void GetArgs(int argc, char *argv[], Options &opt)
                 break;
             case 's':
                 opt.nshots = atoi(optarg);
+                NumArgs += 2;
+                break;
+            case 'd':
+                opt.noise_probs.dep = atof(optarg);
+                NumArgs += 2;
+                break;
+            case 'b':
+                opt.noise_probs.bf = atof(optarg);
+                NumArgs += 2;
+                break;
+            case 'p':
+                opt.noise_probs.pf = atof(optarg);
+                NumArgs += 2;
+                break;
+            case 'v':
+                opt.iverbose = atoi(optarg);
                 NumArgs += 2;
                 break;
             case '?':
@@ -99,12 +129,15 @@ int main(int argc,char **argv) {
 
     Options opt;
     GetArgs(argc, argv, opt);
+
     // set the kernel to a n qubit simulation
     // why does the number of qubits need to be set at compile time?
     auto kernel = ghz{};
+    
     // lets output the circuit
-    if (ThisTask == 0) Log() << cudaq::draw(kernel, opt.nqubits) <<std::endl;
+    if (ThisTask == 0 and opt.iverbose) Log() << cudaq::draw(kernel, opt.nqubits) <<std::endl;
 
+    {
     auto t1 = NewTimerHostOnly();
     auto s1 = NewComputeSampler(0.01);
     auto counts = cudaq::sample(opt.nshots, kernel, opt.nqubits);
@@ -120,9 +153,72 @@ int main(int argc,char **argv) {
     if (!cudaq::mpi::is_initialized() || cudaq::mpi::rank() == 0) {
         // Fine grain access to the bits and counts
         for (auto &[bits, count] : counts) {
-            Log()<<"Observed: "<<bits.data() <<" "<<count<<std::endl;
+            Log()<<"Observed (ideal): "<<bits.data() <<" "<<count<<std::endl;
         }
     }
+    }
+
+    // Now with noise and using a lambda qpu kernel
+
+    // We will begin by defining an empty noise model that we will add
+    // our depolarization channel to.
+    cudaq::noise_model noise;
+
+    // Depolarization channel with a specific probability of the qubit state
+    // being scrambled.
+    cudaq::depolarization_channel depolarization(opt.noise_probs.dep);
+    // and bit flip channel
+    cudaq::bit_flip_channel bf(opt.noise_probs.bf);
+    // Phase flip channel 
+    cudaq::phase_flip_channel pf(opt.noise_probs.pf);
+
+    // We will apply the channel to any X-gate on qubit 0. Meaning,
+    // for each X-gate on our qubit, the qubit will have a `1.0`
+    // probability of decaying into a mixed state.
+    noise.add_channel<cudaq::types::x>({0}, depolarization);
+    // We will apply this channel to any X gate on the qubit, giving each X-gate
+    // a probability of `1.0` of undergoing an extra X-gate.
+    noise.add_channel<cudaq::types::x>({0}, bf);
+    // We will apply this channel to any Z gate on the qubit.
+    // Meaning, after each Z gate on qubit 0, there will be a
+    // probability of `1.0` that the qubit undergoes an extra
+    // Z rotation.
+    noise.add_channel<cudaq::types::z>({0}, pf);    
+
+   // Our ghz kernel
+    auto ghzlambda = [](const size_t N) __qpu__ {
+        cudaq::qvector q(N);
+        // cudaq::h(q[0]);
+        // for (int i = 0; i < N - 1; i++) {
+        //     cudaq::x<cudaq::ctrl>(q[i], q[i + 1]);
+        //     cudaq::z(q[i]);
+        // }
+        cudaq::x(q);
+        cudaq::mz(q);
+    };
+
+    // Now let's set the noise and we're ready to run the simulation!
+    {
+    auto t1 = NewTimerHostOnly();
+    auto s1 = NewComputeSampler(0.01);
+    cudaq::set_noise(noise);
+    auto noisy_counts = cudaq::sample(opt.nshots, ghzlambda, opt.nqubits);
+    if (!cudaq::mpi::is_initialized() || cudaq::mpi::rank() == 0) {
+        noisy_counts.dump();
+    }
+    cudaq::unset_noise();
+    LogTimeTaken(t1);
+    LogCPUUsage(s1);
+    LogGPUStatistics(s1);
+
+    if (!cudaq::mpi::is_initialized() || cudaq::mpi::rank() == 0) {
+        // Fine grain access to the bits and counts
+        for (auto &[bits, count] : noisy_counts) {
+            Log()<<"Observed (noisy dep="<<opt.noise_probs.dep<<", bf="<<opt.noise_probs.bf<<", pf="<<opt.noise_probs.pf<<" ): "<<bits.data() <<" "<<count<<std::endl;
+        }
+    }
+    }
+
     cudaq::mpi::finalize();
     return 0;
 }
